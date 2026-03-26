@@ -1,0 +1,211 @@
+# -*- coding: utf-8 -*-
+"""
+database.py — File-system JSON database
+Data stored in: ~/JudoManager/
+"""
+import json, os, shutil, re
+from datetime import datetime
+
+DATA_DIR      = os.path.join(os.path.expanduser("~"), "JudoManager")
+PLAYERS_FILE  = os.path.join(DATA_DIR, "players.json")
+DRAWS_FILE    = os.path.join(DATA_DIR, "draws.json")
+MATCHES_FILE  = os.path.join(DATA_DIR, "matches.json")
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+INPROGRESS_FILE = os.path.join(DATA_DIR, "match_inprogress.json")
+
+DEFAULT_SETTINGS = {
+    "event_name":        "Judo Championship",
+    "match_duration":    240,
+    "osaekomi_ippon":    20,
+    "osaekomi_wazaari":  10,
+    "golden_score":      True,
+    "age_group":         "Senior",
+    "custom_weight_categories": "",
+    "repechage_mode":    "simple",
+    "custom_category_label": "Custom",
+    "champions_by_category": {},
+    "removed_weight_categories": "",
+    "github_token": "",
+}
+
+SAMPLE_PLAYERS = [
+
+]
+
+WEIGHT_CATEGORIES = {
+    "male":   ["-60kg","-66kg","-73kg","-81kg","-90kg","-100kg","+100kg"],
+    "female": ["-48kg","-52kg","-57kg","-63kg","-70kg","-78kg", "+78kg"],
+}
+
+AGE_GROUP_CATEGORIES = {
+    "Senior": {
+        "male":   ["-60kg","-66kg","-73kg","-81kg","-90kg","-100kg","+100kg"],
+        "female": ["-48kg","-52kg","-57kg","-63kg","-70kg","-78kg","+78kg"],
+    },
+    "Junior": {
+        "male":   ["-60kg","-66kg","-73kg","-81kg","-90kg","-100kg","+100kg"],
+        "female": ["-48kg","-52kg","-57kg","-63kg","-70kg","-78kg","+78kg"],
+    },
+    "Cadet": {
+        "male":   ["-55kg","-60kg","-66kg","-73kg","-81kg","-90kg","+90kg"],
+        "female": ["-44kg","-48kg","-52kg","-57kg","-63kg","-70kg","+70kg"],
+    },
+}
+
+def get_age_group_weights(age_group: str, gender: str):
+    if age_group == "Custom":
+        return []
+    group = AGE_GROUP_CATEGORIES.get(age_group, AGE_GROUP_CATEGORIES["Senior"])
+    return group.get(gender, [])
+
+def parse_custom_weights(text: str):
+    if not text:
+        return []
+    return [c.strip() for c in re.split(r"[,\n]+", text) if c.strip()]
+
+def parse_custom_weights_by_gender(text: str):
+    res = {"male": [], "female": []}
+    if not text:
+        return res
+    for token in re.split(r"[,\n]+", text):
+        t = token.strip()
+        if not t:
+            continue
+        m = re.match(r"^(male|female|m|f)[:\\s]+(.+)$", t, re.IGNORECASE)
+        if m:
+            g = m.group(1).lower()
+            g = "male" if g in ("male", "m") else "female"
+            w = m.group(2).strip()
+            if w:
+                res[g].append(w)
+        else:
+            # Backward-compat: no gender specified -> apply to both
+            res["male"].append(t)
+            res["female"].append(t)
+    return res
+
+def parse_gendered_list(text: str):
+    # Same format as parse_custom_weights_by_gender but no backward-compat to both
+    res = {"male": [], "female": []}
+    if not text:
+        return res
+    for token in re.split(r"[,\n]+", text):
+        t = token.strip()
+        if not t:
+            continue
+        m = re.match(r"^(male|female|m|f)[:\\s]+(.+)$", t, re.IGNORECASE)
+        if not m:
+            continue
+        g = m.group(1).lower()
+        g = "male" if g in ("male", "m") else "female"
+        w = m.group(2).strip()
+        if w:
+            res[g].append(w)
+    return res
+
+def combined_weights(age_group: str, gender: str, custom_text: str):
+    extras = parse_custom_weights_by_gender(custom_text).get(gender, [])
+    if age_group == "Custom":
+        return extras
+    base = get_age_group_weights(age_group, gender)
+    removed = set(parse_gendered_list(load_settings().get("removed_weight_categories", "")).get(gender, []))
+    return [w for w in (base + extras) if w not in removed]
+
+def _ensure():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+def _read(path, default):
+    _ensure()
+    if not os.path.exists(path): return default
+    try:
+        with open(path,"r",encoding="utf-8") as f: return json.load(f)
+    except: return default
+
+def _write(path, data):
+    _ensure()
+    tmp = path + ".tmp"
+    with open(tmp,"w",encoding="utf-8") as f: json.dump(data, f, indent=2, ensure_ascii=False)
+    shutil.move(tmp, path)
+
+# ── Players ───────────────────────────────────────────────────────────────────
+def load_players():          return _read(PLAYERS_FILE, [])
+def save_players(players):   _write(PLAYERS_FILE, players)
+
+def add_player(p):
+    players = load_players()
+    p["id"] = max((x["id"] for x in players), default=0) + 1
+    p["created_at"] = datetime.now().isoformat()
+    players.append(p); save_players(players); return p
+
+def update_player(pid, updates):
+    players = load_players()
+    for i,p in enumerate(players):
+        if p["id"]==pid:
+            players[i].update(updates)
+            players[i]["updated_at"] = datetime.now().isoformat()
+            save_players(players); return True
+    return False
+
+def delete_player(pid):
+    players = load_players()
+    new = [p for p in players if p["id"]!=pid]
+    if len(new)==len(players): return False
+    save_players(new); return True
+
+def get_player(pid):
+    for p in load_players():
+        if p["id"]==pid: return p
+    return None
+
+def get_players_by_category(gender, weight):
+    return [p for p in load_players()
+            if p.get("gender")==gender and p.get("weight")==weight]
+
+# ── Draws ─────────────────────────────────────────────────────────────────────
+def load_draws():                        return _read(DRAWS_FILE, {})
+def save_draws(d):                       _write(DRAWS_FILE, d)
+def get_draw(key):                       return load_draws().get(key)
+def set_draw(key, data):
+    d=load_draws(); d[key]=data; d[key]["updated_at"]=datetime.now().isoformat(); save_draws(d)
+def delete_draw(key):
+    d=load_draws()
+    if key in d: del d[key]; save_draws(d)
+
+# ── Match history ─────────────────────────────────────────────────────────────
+def load_matches():          return _read(MATCHES_FILE, [])
+def save_match_result(r):
+    m=load_matches(); r["saved_at"]=datetime.now().isoformat(); m.append(r); _write(MATCHES_FILE,m)
+def clear_match_history():
+    _write(MATCHES_FILE, [])
+def save_matches(matches):
+    _write(MATCHES_FILE, matches if isinstance(matches, list) else [])
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+def load_settings():
+    return {**DEFAULT_SETTINGS, **_read(SETTINGS_FILE, {})}
+def save_settings(s):        _write(SETTINGS_FILE, s)
+def get_data_dir():          return DATA_DIR
+
+def ensure_sample_players():
+    """Add sample players if DB is empty."""
+    if not load_players():
+        for p in SAMPLE_PLAYERS:
+            add_player(dict(p))
+
+# ── In-progress match state ────────────────────────────────────────────────────
+def save_inprogress_match(state: dict):
+    """Save the current match state so it can be restored after a crash/close."""
+    state["autosaved_at"] = datetime.now().isoformat()
+    _write(INPROGRESS_FILE, state)
+
+def load_inprogress_match() -> dict:
+    """Load the last in-progress match state, or empty dict if none."""
+    return _read(INPROGRESS_FILE, {})
+
+def clear_inprogress_match():
+    """Delete the in-progress snapshot (called after manual save or reset)."""
+    if os.path.exists(INPROGRESS_FILE):
+        try:
+            os.remove(INPROGRESS_FILE)
+        except Exception:
+            pass
